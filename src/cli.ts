@@ -10,7 +10,7 @@ const options = { configPath: '.charter', format: 'text' as const, ciMode: false
 
 async function run() {
   try {
-    let code = EXIT_CODE.SUCCESS;
+    let code: number = EXIT_CODE.SUCCESS;
     if (cmd === 'login') code = await loginCommand(options, args);
     else if (cmd === 'architect') code = await architectCommand(options, args);
     else if (cmd === 'run') code = await runCommand(options, args);
