@@ -35,9 +35,9 @@ export async function loginCommand(options: CLIOptions, args: string[]): Promise
       console.log(`Preferred: export ${API_KEY_ENV_VAR}=ea_xxx (or sb_live_xxx, sb_test_xxx).`);
       console.log('');
       console.log('Deprecated alternative:');
-      console.log('  charter login --key ea_xxx');
-      console.log('  charter login --key sb_live_xxx');
-      console.log('  charter login --key sb_test_xxx');
+      console.log('  stackbilt login --key ea_xxx');
+      console.log('  stackbilt login --key sb_live_xxx');
+      console.log('  stackbilt login --key sb_test_xxx');
       console.log('');
       console.log('Get your API key from auth.stackbilt.dev (ea_) or the Stackbilt dashboard (sb_).');
     }

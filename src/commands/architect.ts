@@ -17,7 +17,7 @@ export async function architectCommand(options: CLIOptions, args: string[]): Pro
   } else if (positional.length > 0) {
     description = positional.join(' ');
   } else {
-    throw new CLIError('Provide a project description:\n  charter architect "Build a real-time chat app"\n  charter architect --file spec.md');
+    throw new CLIError('Provide a project description:\n  stackbilt architect "Build a real-time chat app"\n  stackbilt architect --file spec.md');
   }
 
   if (!description) throw new CLIError('Empty description.');
@@ -59,7 +59,7 @@ export async function architectCommand(options: CLIOptions, args: string[]): Pro
   if (!dryRun) {
     cacheResult(result, options.configPath);
     console.log('');
-    console.log(`Build cached. Run \`charter scaffold\` to write files.`);
+    console.log(`Build cached. Run \`stackbilt scaffold\` to write files.`);
   } else {
     console.log('');
     console.log('(dry run — no files written)');
