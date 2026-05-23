@@ -123,7 +123,7 @@ export class EngineClient {
     if (!this.apiKey) {
       throw new Error(
         'API key required for scaffold. Set STACKBILT_API_KEY in the environment, ' +
-          'or (deprecated) run `charter login --key sb_live_xxx`.',
+          'or (deprecated) run `stackbilt login --key sb_live_xxx`.',
       );
     }
 

@@ -122,7 +122,7 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
 
   console.log('');
   if (!useGateway) {
-    console.log('  \x1b[2m(tip: run `charter login --key sb_live_xxx` for deployment-ready scaffolds)\x1b[0m');
+    console.log('  \x1b[2m(tip: run `stackbilt login --key sb_live_xxx` for deployment-ready scaffolds)\x1b[0m');
     console.log('');
   }
 

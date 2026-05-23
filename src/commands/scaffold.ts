@@ -10,14 +10,14 @@ export async function scaffoldCommand(options: CLIOptions, args: string[]): Prom
   const cachePath = path.join(configPath, 'last-build.json');
 
   if (!fs.existsSync(cachePath)) {
-    throw new CLIError('No cached build found. Run `charter architect "..."` first.');
+    throw new CLIError('No cached build found. Run `stackbilt architect "..."` first.');
   }
 
   let result: BuildResult;
   try {
     result = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
   } catch {
-    throw new CLIError('Could not parse cached build. Run `charter architect "..."` again.');
+    throw new CLIError('Could not parse cached build. Run `stackbilt architect "..."` again.');
   }
 
   if (!result.scaffold || Object.keys(result.scaffold).length === 0) {
