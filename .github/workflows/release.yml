@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches-ignore:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish (for backfill), e.g. v0.4.2'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ -z "${TAG}" ]]; then
+            echo "Tag could not be resolved." >&2
+            exit 1
+          fi
+
+          echo "value=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid tag format: ${TAG}. Expected v<major>.<minor>.<patch>" >&2
+            exit 1
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            PKG_VERSION="$(node -p "require('./package.json').version")"
+            EXPECTED_TAG="v${PKG_VERSION}"
+
+            if [[ "${TAG}" != "${EXPECTED_TAG}" ]]; then
+              echo "Tag/version mismatch on push: got ${TAG}, expected ${EXPECTED_TAG}" >&2
+              exit 1
+            fi
+          else
+            if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+              echo "Tag not found in repository: ${TAG}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Build release notes from CHANGELOG
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          VERSION="${TAG#v}"
+
+          awk -v version="${VERSION}" '
+            BEGIN { in_section=0 }
+            $0 ~ "^## \\[" version "\\]" { in_section=1; print; next }
+            in_section && $0 ~ "^## \\[" { exit }
+            in_section { print }
+          ' CHANGELOG.md > release_notes.md
+
+          if [[ ! -s release_notes.md ]]; then
+            echo "## ${TAG}" > release_notes.md
+            echo >> release_notes.md
+            echo "See CHANGELOG.md for release details." >> release_notes.md
+          fi
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          name: ${{ steps.tag.outputs.value }}
+          body_path: release_notes.md
+          generate_release_notes: true
+
+  publish-npm:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '20'
+
+      - name: Upgrade npm for trusted-publisher support
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify tag and workspace versions
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid tag format: ${TAG}. Expected v<major>.<minor>.<patch>"
+            exit 1
+          fi
+
+          EXPECTED="${TAG#v}"
+          V=$(node -p "require('./package.json').version")
+          N=$(node -p "require('./package.json').name")
+          if [[ "$V" != "$EXPECTED" ]]; then
+            echo "::error::$N version $V does not match tag $EXPECTED"
+            exit 1
+          fi
+
+      - name: Publish to npm
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          mkdir -p release-tarballs
+
+          npm pack --pack-destination ./release-tarballs
+
+          TARBALL="./release-tarballs/stackbilt-build-${VERSION}.tgz"
+          if npm view "@stackbilt/build@${VERSION}" version &>/dev/null 2>&1; then
+            echo "Skipping @stackbilt/build@${VERSION} — already published"
+          else
+            npm publish "${TARBALL}" --access public --provenance
+          fi
