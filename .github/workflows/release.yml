@@ -72,12 +72,14 @@ jobs:
           TAG="${{ steps.tag.outputs.value }}"
           VERSION="${TAG#v}"
 
-          awk -v version="${VERSION}" '
-            BEGIN { in_section=0 }
-            $0 ~ "^## \\[" version "\\]" { in_section=1; print; next }
-            in_section && $0 ~ "^## \\[" { exit }
-            in_section { print }
-          ' CHANGELOG.md > release_notes.md
+          if [[ -f CHANGELOG.md ]]; then
+            awk -v version="${VERSION}" '
+              BEGIN { in_section=0 }
+              $0 ~ "^## \\[" version "\\]" { in_section=1; print; next }
+              in_section && $0 ~ "^## \\[" { exit }
+              in_section { print }
+            ' CHANGELOG.md > release_notes.md
+          fi
 
           if [[ ! -s release_notes.md ]]; then
             echo "## ${TAG}" > release_notes.md
@@ -113,7 +115,7 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Install dependencies
-        run: npm ci
+        run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
       - name: Build
         run: npm run build
