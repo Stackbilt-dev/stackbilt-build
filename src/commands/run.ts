@@ -4,7 +4,20 @@ import type { CLIOptions } from '../index.js';
 import { EXIT_CODE, CLIError } from '../index.js';
 import { getFlag } from '../flags.js';
 import { resolveApiKey } from '../credentials.js';
-import { EngineClient, type BuildRequest, type ScaffoldResult } from '../http-client.js';
+import { EngineClient, type BuildRequest, type BuildResult, type ScaffoldResult } from '../http-client.js';
+
+// Cache path must match scaffold.ts: path.join(options.configPath, 'last-build.json')
+// Only call with BuildResult (engine path) — scaffold.ts reads .scaffold/.stack/.seed
+function cacheBuildResult(result: BuildResult, configPath: string): void {
+  const dir = configPath || '.charter';
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(dir, 'last-build.json'),
+    JSON.stringify(result, null, 2),
+  );
+}
 
 const PHASE_LABELS = ['PRODUCT', 'UX', 'RISK', 'ARCHITECT', 'TDD', 'SPRINT'];
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -85,6 +98,11 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
   const useGateway = !!resolved?.apiKey;
 
   let scaffoldPromise: Promise<ScaffoldResult>;
+  // rawBuildResult is populated on the non-gateway path so scaffold.ts can read
+  // the cache in BuildResult shape (.scaffold dict). Gateway path returns
+  // ScaffoldResult (.files[]) which is a different shape — scaffold.ts is not
+  // compatible with that and will error with a clear message.
+  let rawBuildResult: BuildResult | null = null;
 
   if (useGateway) {
     scaffoldPromise = client.scaffold({
@@ -100,13 +118,16 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
     if (dbOverride) request.constraints!.database = dbOverride;
     if (seedStr) request.seed = parseInt(seedStr, 10);
 
-    scaffoldPromise = client.build(request).then(r => ({
-      files: Object.entries(r.scaffold).map(([p, content]) => ({ path: p, content, role: 'scaffold' as const })),
-      fileSource: 'engine' as const,
-      nextSteps: ['npm install', 'npm run dev'],
-      seed: r.seed,
-      receipt: r.receipt,
-    }));
+    scaffoldPromise = client.build(request).then(r => {
+      rawBuildResult = r;
+      return {
+        files: Object.entries(r.scaffold).map(([p, content]) => ({ path: p, content, role: 'scaffold' as const })),
+        fileSource: 'engine' as const,
+        nextSteps: ['npm install', 'npm run dev'],
+        seed: r.seed,
+        receipt: r.receipt,
+      };
+    });
   }
 
   if (options.format === 'json') {
@@ -114,6 +135,10 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
     console.log(JSON.stringify({ ...result, outputDir: resolvedOutput, dryRun }, null, 2));
     if (!dryRun) {
       writeFiles(resolvedOutput, result.files);
+      // Cache in BuildResult shape when available so `stackbilt scaffold` can read it
+      if (rawBuildResult) {
+        cacheBuildResult(rawBuildResult, options.configPath);
+      }
     }
     return EXIT_CODE.SUCCESS;
   }
@@ -176,6 +201,10 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
     console.log('  (dry run — no files written)');
   } else {
     writeFiles(resolvedOutput, result.files);
+    // Cache in BuildResult shape when available so `stackbilt scaffold` can read it
+    if (rawBuildResult) {
+      cacheBuildResult(rawBuildResult, options.configPath);
+    }
     console.log(`  → ${result.files.length} files scaffolded to ${resolvedOutput}/`);
     console.log(`  → Architecture governed · seed: ${result.seed ?? 'deterministic'}`);
     if (result.nextSteps && result.nextSteps.length > 0) {
