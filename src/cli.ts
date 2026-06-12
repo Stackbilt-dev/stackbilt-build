@@ -101,21 +101,27 @@ Examples:
 Usage: stackbilt run <description> [options]
 
 Run the full scaffold pipeline: classify, build, and write project files.
+Default: fully offline using @stackbilt/scaffold-core (zero network, no API key required).
 
 Options:
   --file <path>       Read description from a file instead of inline argument
   --output <dir>      Output directory (default: ./<slugified-description>)
-  --seed <n>          Deterministic seed for stack selection
-  --url <url>         Override engine base URL
-  --framework <name>  Constrain framework selection
-  --database <name>   Constrain database selection
-  --cloudflare-only   Only consider Cloudflare-native primitives
+  --gateway           Use the Stackbilt gateway (requires API key, TarotScript tier-2)
+  --persist           Save scaffold to your platform account (requires API key)
+  --oracle            Request LLM polish on the persisted scaffold (requires --persist)
+  --seed <n>          Deterministic seed (gateway only)
+  --url <url>         Override engine base URL (gateway only)
+  --framework <name>  Constrain framework selection (gateway only)
+  --database <name>   Constrain database selection (gateway only)
+  --cloudflare-only   Only consider Cloudflare-native primitives (gateway only)
   --dry-run           Show what would be written, without writing files
   --format json       Emit scaffold result as JSON
 
 Examples:
   stackbilt run "real-time chat app with Durable Objects"
+  stackbilt run "multi-tenant SaaS API" --persist --oracle
   stackbilt run --file spec.md --output ./my-project
+  stackbilt run "webhook handler" --gateway
 `.trimStart(),
 
   scaffold: `
