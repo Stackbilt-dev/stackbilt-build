@@ -52,7 +52,7 @@
   },
   "dependencies": {
     "@stackbilt/core": "^1.0.0",
-    "@stackbilt/scaffold-core": "file:packages/scaffold-core"
+    "@stackbilt/scaffold-core": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
