@@ -1,126 +1,329 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+/**
+ * stackbilt architect <intention>
+ *
+ * Zero-network, zero-inference governance document generator. Pure heuristic, <1ms.
+ * Consumes the same classifyScaffoldIntention output as the `classify` command and
+ * emits three governance artefacts as markdown:
+ *   - Threat Model (STRIDE-shaped, pattern-specific)
+ *   - ADR-001 (pattern + bindings rationale)
+ *   - ADR-002 (compliance domains — only emitted when detected)
+ *
+ * The template structure mirrors what @stackbilt/scaffold-core/governance will export
+ * once charter#218 ships — swap the template functions to that import in build#4.
+ * TODO(build#4): replace inline templates with `import { governanceDocs } from '@stackbilt/scaffold-core/governance'`
+ *
+ * Flags:
+ *   --format json   emit { threatModel, adr001, adr002, testPlan } as JSON
+ */
+
 import { sanitizeInput } from '@stackbilt/core';
 import type { CLIOptions } from '../index.js';
 import { EXIT_CODE, CLIError } from '../index.js';
-import { getFlag } from '../flags.js';
-import { resolveApiKey } from '../credentials.js';
-import { EngineClient, type BuildRequest, type BuildResult } from '../http-client.js';
+import { classifyScaffoldIntention } from './classify.js';
+import type { ClassifyResult, ScaffoldPattern, Binding } from './classify.js';
+
+// ============================================================================
+// Compliance domain detection
+// ============================================================================
+
+export interface ComplianceDomains {
+  pci: boolean;
+  gdpr: boolean;
+  hipaa: boolean;
+  soc2: boolean;
+}
+
+export function detectComplianceDomains(intention: string): ComplianceDomains {
+  const i = intention.toLowerCase();
+  return {
+    pci: /\b(stripe|payment|card|billing|checkout|invoice|pci)\b/.test(i),
+    gdpr: /\b(gdpr|personal.?data|pii|data.?subject|consent|erasure|eu.?user)\b/.test(i),
+    hipaa: /\b(hipaa|health|medical|patient|phi|ehr|clinic)\b/.test(i),
+    soc2: /\b(soc.?2|audit.?log|compliance|audit|rbac)\b/.test(i),
+  };
+}
+
+function hasComplianceDomain(domains: ComplianceDomains): boolean {
+  return domains.pci || domains.gdpr || domains.hipaa || domains.soc2;
+}
+
+// ============================================================================
+// Threat model template
+// ============================================================================
+
+const PATTERN_THREATS: Record<ScaffoldPattern, string[]> = {
+  'workers-saas': [
+    'Tenant isolation failure — cross-tenant data leak via missing org_id scope on every query',
+    'Privilege escalation — role checks missing on admin endpoints',
+    'Billing manipulation — quota bypass by replaying API calls before rate-limit window resets',
+    'Mass assignment — unguarded PATCH merging user-supplied fields onto restricted columns',
+  ],
+  'workers-api': [
+    'Unauthenticated endpoint exposure — routes reachable without bearer token',
+    'Input injection — unsanitized path parameters passed to D1 queries',
+    'SSRF via fetch — user-supplied URLs forwarded without allowlist validation',
+    'Credential leakage — API keys logged in error responses',
+  ],
+  'discord-bot': [
+    'Interaction replay — missing interaction token expiry check (15-minute window)',
+    'Slash command injection — user-supplied option values interpolated into messages',
+    'Guild escalation — bot responds to guilds it was not explicitly added to',
+    'Rate-limit DoS — no per-user debounce on expensive slash commands',
+  ],
+  'stripe-webhook': [
+    'Signature bypass — HMAC verification skipped in test/dev mode leaking to production',
+    'Event replay — missing idempotency key check allows duplicate billing side-effects',
+    'Webhook flooding — no request volume cap on the ingestion endpoint',
+    'Data exfiltration — raw Stripe event objects logged in full (contains PII)',
+  ],
+  'github-webhook': [
+    'Signature bypass — `X-Hub-Signature-256` verification absent or timing-unsafe',
+    'Event replay — duplicate delivery (GitHub retries) triggers duplicate side-effects',
+    'Scope creep — handler acts on repos outside expected org without allowlist',
+    'Payload injection — branch/commit message content unsafely interpolated into downstream calls',
+  ],
+  'mcp-server': [
+    'Tool injection — user-controlled arguments reach shell exec or file system without sanitization',
+    'Capability leakage — tools expose internal filesystem paths or env vars in error messages',
+    'Prompt injection — LLM-generated tool arguments passed back unvalidated',
+    'Runaway tool invocation — no per-session tool-call rate limit',
+  ],
+  'queue-consumer': [
+    'Poison message DoS — malformed payload causes tight retry loop exhausting queue retries',
+    'Idempotency failure — non-idempotent handler triggered twice on redelivery',
+    'Payload deserialization — untrusted queue message shapes cause runtime exceptions',
+    'DLQ silent drain — dead-letter queue never alarmed, failures silently accumulate',
+  ],
+  'cron-worker': [
+    'Runaway execution — scheduled handler lacks timeout, holds resources across runs',
+    'Overlapping runs — no distributed lock; concurrent invocations corrupt shared state',
+    'Silent failure — handler exceptions swallowed; cron appears healthy but does nothing',
+    'Scope creep — cron accesses production data in non-production environments',
+  ],
+  'rest-api': [
+    'Unauthenticated routes — endpoints reachable without authentication header',
+    'Input injection — path and query parameters passed to downstream systems unsanitized',
+    'CORS misconfiguration — wildcard origin permits cross-site credential access',
+    'Error verbosity — stack traces exposed in 5xx responses',
+  ],
+};
+
+function bindingThreats(bindings: Binding[]): string[] {
+  const threats: string[] = [];
+  if (bindings.includes('d1')) threats.push('SQL injection via raw D1 query string interpolation — use prepared statements exclusively');
+  if (bindings.includes('kv')) threats.push('KV namespace pollution — user-controlled key prefix allows overwriting sibling keys');
+  if (bindings.includes('r2')) threats.push('Object path traversal — user-supplied filenames must be normalised before R2 put/get');
+  if (bindings.includes('do')) threats.push('Durable Object state leak — state persists across requests; must be explicitly cleared per-session');
+  if (bindings.includes('queues')) threats.push('Queue backpressure — unchecked producer rate can exhaust queue capacity limits');
+  if (bindings.includes('ai')) threats.push('Model output injection — LLM responses rendered as HTML without escaping enables XSS');
+  return threats;
+}
+
+function buildThreatModel(intention: string, result: ClassifyResult, domains: ComplianceDomains): string {
+  const patternThreats = PATTERN_THREATS[result.pattern] ?? [];
+  const bThreats = bindingThreats(result.bindings);
+  const complianceNotes: string[] = [];
+  if (domains.pci) complianceNotes.push('PCI DSS — card data must never transit this service; delegate to Stripe Elements');
+  if (domains.gdpr) complianceNotes.push('GDPR — implement right-to-erasure endpoint; log consent events; restrict PII to EU region');
+  if (domains.hipaa) complianceNotes.push('HIPAA — PHI at rest must be encrypted; audit log every access event to D1');
+  if (domains.soc2) complianceNotes.push('SOC 2 — immutable audit trail required; RBAC on all admin operations');
+
+  const threatLines = patternThreats
+    .concat(bThreats)
+    .map((t, i) => `| T${String(i + 1).padStart(2, '0')} | ${t} | Medium | Validate & sanitize at boundary |`)
+    .join('\n');
+
+  const complianceSection = complianceNotes.length > 0
+    ? `\n## Compliance Notes\n\n${complianceNotes.map(n => `- ${n}`).join('\n')}\n`
+    : '';
+
+  return `# Threat Model
+
+**Intention:** ${intention}
+**Pattern:** \`${result.pattern}\`
+**Confidence:** ${result.confidence}
+**Bindings:** ${result.bindings.length > 0 ? result.bindings.join(', ') : 'none'}
+
+## STRIDE Surface
+
+| ID | Threat | Severity | Mitigation |
+|----|--------|----------|------------|
+${threatLines}
+${complianceSection}
+## Out of Scope
+
+- Infrastructure-layer threats (Cloudflare DDoS mitigation, TLS termination)
+- Supply-chain attacks on npm dependencies
+- Physical / social-engineering vectors
+`;
+}
+
+// ============================================================================
+// ADR templates
+// ============================================================================
+
+const PATTERN_RATIONALE: Record<ScaffoldPattern, string> = {
+  'workers-saas': 'Cloudflare Workers + D1 provides edge-native multi-tenancy with row-level isolation, eliminating cold-start latency for subscription-tier enforcement.',
+  'workers-api': 'Cloudflare Workers delivers sub-millisecond globally-distributed API routing with zero server management overhead.',
+  'discord-bot': 'Workers-based interaction endpoint satisfies the 3-second Discord response deadline without provisioning persistent servers.',
+  'stripe-webhook': 'Edge-native webhook ingestion minimises end-to-end latency from Stripe delivery to business-logic execution, with HMAC verification at the boundary.',
+  'github-webhook': 'Stateless Workers handler provides reliable, low-latency GitHub event ingestion with automatic horizontal scaling during push storms.',
+  'mcp-server': 'Workers runtime exposes MCP-compatible tool endpoints at the edge, enabling LLM agents to invoke tools with <100ms RTT from any region.',
+  'queue-consumer': 'Cloudflare Queues with Workers consumer provides at-least-once delivery with configurable retry and dead-letter semantics without managing broker infrastructure.',
+  'cron-worker': 'Workers Cron Triggers provide globally-consistent scheduled execution with second-level granularity and automatic retries on failure.',
+  'rest-api': 'Standard REST API pattern with Hono router provides familiar request/response semantics with strong TypeScript ergonomics.',
+};
+
+function buildADR001(intention: string, result: ClassifyResult): string {
+  const rationale = PATTERN_RATIONALE[result.pattern] ?? 'Pattern selected based on heuristic intent classification.';
+  const bindingList = result.bindings.length > 0
+    ? result.bindings.map(b => `- \`${b}\`: included based on detected intent signals`).join('\n')
+    : '- No platform bindings detected; add as requirements crystallise';
+
+  const traitLines = [
+    `- **Route shape**: \`${result.traits.route_shape}\``,
+    `- **Verification**: \`${result.traits.verification}\``,
+    `- **Dispatch**: \`${result.traits.dispatch}\``,
+  ].join('\n');
+
+  return `# ADR-001: Scaffold Pattern Selection
+
+**Status:** Proposed
+**Date:** ${new Date().toISOString().slice(0, 10)}
+
+## Context
+
+${intention}
+
+## Decision
+
+Classify as **\`${result.pattern}\`** (confidence: ${result.confidence}, tier ${result.tier}).
+
+${rationale}
+
+## Traits
+
+${traitLines}
+
+## Bindings
+
+${bindingList}
+
+## Consequences
+
+- Scaffold generates files optimised for \`${result.pattern}\` conventions
+- Team should validate bindings list against actual infrastructure requirements before provisioning
+- Confidence is **${result.confidence}** — ${result.confidence === 'low' ? 'expand the intention description for a more accurate classification' : 'proceed with scaffold'}
+`;
+}
+
+function buildADR002(intention: string, domains: ComplianceDomains): string {
+  const active: string[] = [];
+  if (domains.pci) active.push('PCI DSS');
+  if (domains.gdpr) active.push('GDPR');
+  if (domains.hipaa) active.push('HIPAA');
+  if (domains.soc2) active.push('SOC 2');
+
+  const requirements: string[] = [];
+  if (domains.pci) requirements.push('- Never store, log, or transit raw card numbers; delegate capture to Stripe.js / Stripe Elements\n- Restrict network access to Stripe API IPs only\n- Enable Radar fraud rules before go-live');
+  if (domains.gdpr) requirements.push('- Implement `DELETE /users/:id` with cascading erasure across all tables\n- Collect and store explicit consent events with timestamp\n- Restrict PII storage to EU-region D1 databases');
+  if (domains.hipaa) requirements.push('- Encrypt PHI at rest (D1 column-level encryption or separate encrypted KV namespace)\n- Emit immutable audit log entry for every PHI read/write event\n- BAA required with Cloudflare before handling real patient data');
+  if (domains.soc2) requirements.push('- Append-only audit log table (`audit_events`) with actor, action, resource, timestamp\n- RBAC: every admin operation guarded by role assertion before execution\n- Automated alerting on privilege escalation attempts');
+
+  return `# ADR-002: Compliance Domain Requirements
+
+**Status:** Proposed
+**Date:** ${new Date().toISOString().slice(0, 10)}
+
+## Context
+
+Intention analysis detected the following compliance domains: **${active.join(', ')}**.
+
+## Decision
+
+Implement the domain-specific requirements below before handling production data.
+
+${requirements.join('\n\n')}
+
+## Consequences
+
+- Additional development time required for compliance controls
+- Security review gate recommended before first production deployment
+- Consider engaging a compliance consultant for ${active.join(' / ')} audit if data volume exceeds MVP scale
+`;
+}
+
+// ============================================================================
+// Test plan template (included in JSON output)
+// ============================================================================
+
+function buildTestPlan(result: ClassifyResult, domains: ComplianceDomains): string {
+  const cases: string[] = [
+    `- [ ] Happy path: valid ${result.traits.verification !== 'none' ? 'authenticated ' : ''}request returns expected response`,
+    `- [ ] Missing auth: request without ${result.traits.verification !== 'none' ? result.traits.verification + ' credentials' : 'required headers'} returns 401`,
+    `- [ ] Input validation: malformed payload returns 400 with structured error`,
+    `- [ ] Idempotency: duplicate ${result.traits.dispatch === 'event-handler' ? 'event delivery' : 'request'} produces no side-effects`,
+  ];
+  if (result.bindings.includes('d1')) cases.push('- [ ] DB boundary: prepared statement path exercised for every parameterised query');
+  if (result.bindings.includes('queues')) cases.push('- [ ] Poison message: malformed queue payload triggers DLQ rather than crash loop');
+  if (domains.pci) cases.push('- [ ] PCI: no card number appears in logs, error responses, or D1 rows');
+  if (domains.gdpr) cases.push('- [ ] GDPR: erasure endpoint removes all PII records for a test subject');
+
+  return `# Test Plan
+
+**Pattern:** \`${result.pattern}\` | **Tier:** ${result.tier}
+
+## Required Cases
+
+${cases.join('\n')}
+
+## Coverage Targets
+
+- Unit: pure functions (validation, transformation, classification)
+- Integration: binding interactions (D1 queries, KV reads, queue publish)
+- E2E: at least one happy-path flow exercised against a staging environment
+`;
+}
+
+// ============================================================================
+// Command
+// ============================================================================
 
 export async function architectCommand(options: CLIOptions, args: string[]): Promise<number> {
-  const filePath = getFlag(args, '--file');
-  const positional = args.filter(a => !a.startsWith('-') && a !== filePath);
-  let description: string;
+  const positional = args.filter(a => !a.startsWith('-'));
+  const intention = positional.join(' ').trim();
 
-  if (filePath) {
-    if (!fs.existsSync(filePath)) throw new CLIError(`File not found: ${filePath}`);
-    description = fs.readFileSync(filePath, 'utf-8').trim();
-  } else if (positional.length > 0) {
-    description = positional.join(' ');
-  } else {
-    throw new CLIError('Provide a project description:\n  stackbilt architect "Build a real-time chat app"\n  stackbilt architect --file spec.md');
+  if (!intention) {
+    throw new CLIError(
+      'Provide an intention:\n  stackbilt architect "multi-tenant SaaS API with Stripe billing"',
+    );
   }
 
-  if (!description) throw new CLIError('Empty description.');
+  const sanitized = sanitizeInput(intention);
+  const result = classifyScaffoldIntention(sanitized);
+  const domains = detectComplianceDomains(sanitized);
 
-  const request: BuildRequest = { description, constraints: {} };
-  if (args.includes('--cloudflare-only')) request.constraints!.cloudflareOnly = true;
-  const fw = getFlag(args, '--framework');
-  if (fw) request.constraints!.framework = fw;
-  const db = getFlag(args, '--database');
-  if (db) request.constraints!.database = db;
-
-  const seedStr = getFlag(args, '--seed');
-  if (seedStr) request.seed = parseInt(seedStr, 10);
-
-  const resolved = resolveApiKey();
-  const baseUrl = getFlag(args, '--url');
-  const client = new EngineClient({
-    baseUrl: baseUrl ?? resolved?.baseUrl,
-    apiKey: resolved?.apiKey ?? null,
-  });
-
-  let result: BuildResult;
-  try {
-    result = await client.build(request);
-  } catch (err) {
-    throw new CLIError(`Build failed: ${(err as Error).message}`);
-  }
-
-  const dryRun = args.includes('--dry-run');
+  const threatModel = buildThreatModel(sanitized, result, domains);
+  const adr001 = buildADR001(sanitized, result);
+  const adr002 = hasComplianceDomain(domains) ? buildADR002(sanitized, domains) : null;
+  const testPlan = buildTestPlan(result, domains);
 
   if (options.format === 'json') {
-    console.log(JSON.stringify(result, null, 2));
-    if (!dryRun) cacheResult(result, options.configPath);
+    const output: Record<string, string | null> = { threatModel, adr001, adr002, testPlan };
+    console.log(JSON.stringify(output, null, 2));
     return EXIT_CODE.SUCCESS;
   }
 
-  printResult(result);
+  console.log(threatModel);
+  console.log('---');
+  console.log('');
+  console.log(adr001);
 
-  if (!dryRun) {
-    cacheResult(result, options.configPath);
+  if (adr002) {
+    console.log('---');
     console.log('');
-    console.log(`Build cached. Run \`stackbilt scaffold\` to write files.`);
-  } else {
-    console.log('');
-    console.log('(dry run — no files written)');
+    console.log(adr002);
   }
 
   return EXIT_CODE.SUCCESS;
-}
-
-function printResult(r: BuildResult): void {
-  const c = r.compatibility;
-
-  console.log('');
-  console.log(`  Stack (seed: ${r.seed}, ${r.requirements.complexity})`);
-  console.log('');
-
-  const maxPos = Math.max(...r.stack.map(s => s.position.length));
-  const maxName = Math.max(...r.stack.map(s => s.name.length));
-  for (const s of r.stack) {
-    const pos = s.position.padEnd(maxPos);
-    const name = s.name.padEnd(maxName);
-    const orient = s.orientation === 'reversed' ? '↓' : '↑';
-    const cf = s.cloudflareNative ? ' [CF]' : '';
-    console.log(`    ${pos}  ${name}  (${s.element}, ${orient})${cf}`);
-  }
-
-  console.log('');
-  console.log(`  Compatibility: ${c.normalizedScore} (${c.pairs.length} pairs, ${c.tensions.length} tensions)`);
-
-  for (const p of c.pairs) {
-    const sign = p.score > 0 ? '+' : p.score < 0 ? '' : ' ';
-    console.log(`    ${p.techs[0]} + ${p.techs[1]} = ${p.relationship} (${sign}${p.score})`);
-  }
-
-  if (c.tensions.length > 0) {
-    console.log('');
-    console.log('  Tensions:');
-    for (const t of c.tensions) {
-      console.log(`    ⚡ ${t.description}`);
-    }
-  }
-
-  console.log('');
-  console.log(`  Scaffold: ${Object.keys(r.scaffold).length} files`);
-  for (const f of Object.keys(r.scaffold).sort()) {
-    const lines = r.scaffold[f].split('\n').length;
-    console.log(`    ${f} (${lines} lines)`);
-  }
-
-  console.log('');
-  console.log(`  Keywords: ${r.requirements.keywords.slice(0, 8).join(', ')}`);
-  console.log(`  Receipt: ${r.receipt.slice(0, 16)}`);
-}
-
-function cacheResult(result: BuildResult, configPath: string): void {
-  const dir = configPath || '.charter';
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  fs.writeFileSync(
-    path.join(dir, 'last-build.json'),
-    JSON.stringify(result, null, 2),
-  );
 }
