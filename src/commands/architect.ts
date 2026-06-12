@@ -9,6 +9,8 @@
  *   --format json   emit { threatModel, adr001, adr002, testPlan } as JSON
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { sanitizeInput } from '@stackbilt/core';
 import { buildScaffold } from '@stackbilt/scaffold-core';
 import type { CLIOptions } from '../index.js';
@@ -25,7 +27,19 @@ export async function architectCommand(options: CLIOptions, args: string[]): Pro
   }
 
   const sanitized = sanitizeInput(intention);
-  const { governance: docs } = buildScaffold(sanitized);
+  const result = buildScaffold(sanitized);
+  const { governance: docs } = result;
+
+  // Write unified cache so `stackbilt scaffold` can generate files without re-running.
+  const cacheDir = options.configPath || '.charter';
+  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+  fs.writeFileSync(path.join(cacheDir, 'last-build.json'), JSON.stringify({
+    intention: sanitized,
+    pattern: result.classification.pattern,
+    classification: result.classification,
+    governance: result.governance,
+    createdAt: new Date().toISOString(),
+  }, null, 2));
 
   if (options.format === 'json') {
     console.log(JSON.stringify({

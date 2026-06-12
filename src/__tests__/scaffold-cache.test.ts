@@ -1,11 +1,9 @@
 /**
- * Tests for scaffold/run cache consistency (Issue #6)
+ * Tests for scaffold/run/architect cache contract (#6, #7)
  *
- * The bug: `stackbilt run` wrote files but never updated last-build.json,
- * so `stackbilt scaffold` following `run` would error with "No cached build found".
- *
- * The fix: run captures rawBuildResult on the engine path and calls cacheBuildResult
- * before returning, using the same path as scaffold.ts reads from.
+ * #6: run now always writes last-build.json (gateway + engine paths)
+ * #7: unified cache shape — { intention, pattern, classification, governance, files?, createdAt }
+ *     scaffold.ts reads both the new shape and legacy BuildResult shape.
  */
 
 import * as fs from 'node:fs';
@@ -130,10 +128,52 @@ describe('scaffold/run cache contract', () => {
 
     expect(fs.existsSync(deepCacheDir)).toBe(false);
 
-    // Simulate cacheBuildResult
+    // Simulate writeCachedBuild mkdir behaviour
     fs.mkdirSync(deepCacheDir, { recursive: true });
     fs.writeFileSync(deepCachePath, JSON.stringify(makeBuildResult(), null, 2));
 
     expect(fs.existsSync(deepCachePath)).toBe(true);
+  });
+
+  it('new unified cache shape is parseable and has expected fields', () => {
+    const unified = {
+      intention: 'multi-tenant SaaS API with Stripe billing',
+      pattern: 'api',
+      classification: { pattern: 'api', confidence: 0.9, traits: ['multi-tenant'], qualityProfile: { testingLevel: 'standard', observability: true, authentication: true, rateLimiting: false, piiHandling: false, complianceDomains: [] }, enrichedIntention: 'multi-tenant SaaS API with Stripe billing' },
+      governance: { threatModel: '# Threat Model', adr001: '# ADR-001', testPlan: '# Test Plan' },
+      files: [{ path: 'src/index.ts', content: 'export default {}' }],
+      createdAt: '2026-06-12T00:00:00.000Z',
+    };
+
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify(unified, null, 2));
+
+    const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    expect(parsed.intention).toBe('multi-tenant SaaS API with Stripe billing');
+    expect(parsed.pattern).toBe('api');
+    expect(parsed.classification.pattern).toBe('api');
+    expect(typeof parsed.classification.confidence).toBe('number');
+    expect(parsed.files).toHaveLength(1);
+    expect(parsed.files[0].path).toBe('src/index.ts');
+    expect(parsed.governance.threatModel).toBeDefined();
+  });
+
+  it('architect cache (no files field) is distinguishable from run cache', () => {
+    const architectCache = {
+      intention: 'REST API with JWT auth',
+      pattern: 'api',
+      classification: { pattern: 'api', confidence: 0.85, traits: ['auth'], qualityProfile: { testingLevel: 'standard', observability: false, authentication: true, rateLimiting: false, piiHandling: false, complianceDomains: [] }, enrichedIntention: 'REST API with JWT auth' },
+      governance: { threatModel: '# Threat Model', adr001: '# ADR-001', testPlan: '# Test Plan' },
+      createdAt: '2026-06-12T00:00:00.000Z',
+      // no `files` field — this is what architect writes
+    };
+
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify(architectCache, null, 2));
+
+    const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    expect(parsed.files).toBeUndefined();
+    expect(parsed.intention).toBeDefined();
+    expect(parsed.governance).toBeDefined();
   });
 });

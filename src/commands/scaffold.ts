@@ -3,8 +3,16 @@ import * as path from 'node:path';
 import type { CLIOptions } from '../index.js';
 import { EXIT_CODE, CLIError } from '../index.js';
 import { getFlag } from '../flags.js';
-import type { BuildResult } from '../http-client.js';
 import { buildScaffold } from '@stackbilt/scaffold-core';
+
+// Cache shapes written by `run` and `architect`.
+// New shape (>= this PR): { intention, pattern, classification, governance, files?, createdAt }
+// Old shape (legacy BuildResult): { scaffold: Record<string,string>, stack, seed, ... }
+type CachedBuild = {
+  intention?: string;
+  files?: Array<{ path: string; content: string }>;
+  scaffold?: Record<string, string>;
+};
 
 export async function scaffoldCommand(options: CLIOptions, args: string[]): Promise<number> {
   const configPath = options.configPath || '.charter';
@@ -15,23 +23,35 @@ export async function scaffoldCommand(options: CLIOptions, args: string[]): Prom
   const positional = args.filter(a => !a.startsWith('-') && a !== getFlag(args, '--output') && a !== getFlag(args, '--intention'));
   const intentionFlag = getFlag(args, '--intention');
 
-  // If there's a cached build from `stackbilt run`, use it.
+  // If there's a cached build from `stackbilt run` or `stackbilt architect`, use it.
   if (fs.existsSync(cachePath)) {
-    let result: BuildResult;
+    let cached: CachedBuild;
     try {
-      result = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+      cached = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
     } catch {
       throw new CLIError('Could not parse cached build. Run `stackbilt architect "..."` again.');
     }
 
-    if (!result.scaffold || Object.keys(result.scaffold).length === 0) {
-      throw new CLIError('Cached build has no scaffold files.');
+    // Resolve files from either new shape (files[]) or old shape (scaffold dict)
+    let resolvedFiles: Array<[string, string]>;
+    if (cached.files && cached.files.length > 0) {
+      // New unified shape: files[] from run — or generate from cached intention (architect path)
+      resolvedFiles = cached.files.map(f => [f.path, f.content] as [string, string]);
+    } else if (!cached.files && cached.intention) {
+      // Architect cache: no files yet — generate them now
+      const generated = buildScaffold(cached.intention).files;
+      resolvedFiles = generated.map(f => [f.path, f.content] as [string, string]);
+    } else if (cached.scaffold && Object.keys(cached.scaffold).length > 0) {
+      // Legacy BuildResult shape
+      resolvedFiles = Object.entries(cached.scaffold) as [string, string][];
+    } else {
+      throw new CLIError('Cached build has no scaffold files. Run `stackbilt run "..."` first.');
     }
 
     const outputDir = getFlag(args, '--output') ?? '.';
     const dryRun = args.includes('--dry-run');
 
-    const files = Object.entries(result.scaffold).sort(([a], [b]) => a.localeCompare(b));
+    const files = resolvedFiles.sort(([a], [b]) => a.localeCompare(b));
 
     if (options.format === 'json') {
       const manifest = files.map(([name, content]) => ({
@@ -44,8 +64,7 @@ export async function scaffoldCommand(options: CLIOptions, args: string[]): Prom
     }
 
     console.log('');
-    console.log(`  Scaffold from build (seed: ${result.seed})`);
-    console.log(`  Stack: ${result.stack.map(s => s.name).join(' + ')}`);
+    console.log(`  Scaffold from build`);
     console.log(`  Output: ${path.resolve(outputDir)}`);
     console.log('');
 
