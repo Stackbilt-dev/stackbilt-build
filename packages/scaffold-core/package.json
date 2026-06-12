@@ -1,0 +1,30 @@
+{
+  "name": "@stackbilt/scaffold-core",
+  "version": "1.0.0",
+  "description": "Local shim for @stackbilt/scaffold-core — forwards to the real package once charter#220 merges",
+  "sideEffects": false,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./classify": {
+      "types": "./dist/classify.d.ts",
+      "default": "./dist/classify.js"
+    },
+    "./governance": {
+      "types": "./dist/governance.d.ts",
+      "default": "./dist/governance.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "license": "Apache-2.0"
+}
