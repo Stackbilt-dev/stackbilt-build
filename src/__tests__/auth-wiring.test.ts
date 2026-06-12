@@ -93,27 +93,33 @@ afterEach(() => {
   fs.rmSync(tmpCwd, { recursive: true, force: true });
 });
 
-describe('architect — auth wiring', () => {
-  it('forwards the env-sourced API key (and custom baseUrl) to EngineClient', async () => {
+describe('architect — governance-only (no network)', () => {
+  // architect was rewritten in Issue #5 to be zero-network: it runs classify
+  // heuristics locally and emits governance docs as markdown/JSON.
+  // EngineClient is no longer instantiated by this command.
+
+  it('returns SUCCESS and emits JSON governance docs without any network call', async () => {
     mockedResolveApiKey.mockReturnValue({
       apiKey: 'ea_env_wiring',
       source: 'env',
       baseUrl: 'https://engine.example',
     });
 
-    await architectCommand(options, ['a simple project description']);
+    const code = await architectCommand(options, ['multi-tenant SaaS API with Stripe billing']);
 
-    expect(hoisted.constructorArgs).toHaveLength(1);
-    expect(hoisted.constructorArgs[0].apiKey).toBe('ea_env_wiring');
-    expect(hoisted.constructorArgs[0].baseUrl).toBe('https://engine.example');
+    expect(code).toBe(0);
+    // EngineClient must NOT have been instantiated — architect is pure heuristic
+    expect(hoisted.constructorArgs).toHaveLength(0);
   });
 
-  it('passes apiKey=null to EngineClient when resolveApiKey returns null', async () => {
+  it('returns SUCCESS with no API key — governance docs need no auth', async () => {
     mockedResolveApiKey.mockReturnValue(null);
 
-    await architectCommand(options, ['unauthenticated fallback']);
+    const code = await architectCommand(options, ['GitHub webhook handler']);
 
-    expect(hoisted.constructorArgs[0].apiKey).toBeNull();
+    expect(code).toBe(0);
+    expect(hoisted.constructorArgs).toHaveLength(0);
+    expect(hoisted.buildFn).not.toHaveBeenCalled();
   });
 });
 
