@@ -2,6 +2,7 @@
 import { CLIError, EXIT_CODE } from './index.js';
 import { loginCommand } from './commands/login.js';
 import { architectCommand } from './commands/architect.js';
+import { classifyCommand } from './commands/classify.js';
 import { runCommand } from './commands/run.js';
 import { scaffoldCommand } from './commands/scaffold.js';
 
@@ -13,6 +14,7 @@ async function run() {
     let code: number = EXIT_CODE.SUCCESS;
     if (cmd === 'login') code = await loginCommand(options, args);
     else if (cmd === 'architect') code = await architectCommand(options, args);
+    else if (cmd === 'classify') code = await classifyCommand(options, args);
     else if (cmd === 'run') code = await runCommand(options, args);
     else if (cmd === 'scaffold') code = await scaffoldCommand(options, args);
     else { console.error(`Unknown command: ${cmd}`); code = EXIT_CODE.FAILURE; }
