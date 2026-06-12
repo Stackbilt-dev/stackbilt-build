@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { sanitizeInput } from '@stackbilt/core';
 import type { CLIOptions } from '../index.js';
 import { EXIT_CODE, CLIError } from '../index.js';
 import { getFlag } from '../flags.js';

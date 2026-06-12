@@ -6,6 +6,7 @@
  * once charter#213 lands — swap to that import in build#4.
  */
 
+import { sanitizeInput } from '@stackbilt/core';
 import type { CLIOptions } from '../index.js';
 import { EXIT_CODE, CLIError } from '../index.js';
 
@@ -123,10 +124,12 @@ const PATTERN_RULES: PatternRule[] = [
       { terms: /\b(cloudflare.?worker|edge.?api|worker)\b/i, weight: 1 },
     ],
   },
+  // rest-api: intentionally last — only reached when no Workers-specific keyword matches
   {
     pattern: 'rest-api',
     signals: [
-      { terms: /\b(api|rest|http|endpoint|route|server)\b/i, weight: 1 },
+      { terms: /\b(http.?server|express|fastify|hono)\b/i, weight: 2 },
+      { terms: /\b(server|listener|port)\b/i, weight: 1 },
     ],
   },
 ];
@@ -189,7 +192,7 @@ function detectBindings(intention: string): Binding[] {
   if (/\b(kv|cache|session|fast.?read|key.?value|config)\b/i.test(intention)) bindings.add('kv');
   if (/\b(r2|storage|file|image|video|upload|download|attachment|asset|bucket)\b/i.test(intention)) bindings.add('r2');
   if (/\b(queue|job|background|async.?process|worker.?queue)\b/i.test(intention)) bindings.add('queues');
-  if (/\b(durable.?object|do|realtime|websocket|live|collaborative)\b/i.test(intention)) bindings.add('do');
+  if (/\b(durable.?objects?|realtime|websocket|live|collaborative)\b/i.test(intention)) bindings.add('do');
   if (/\b(ai|llm|inference|embeddings?|vector|model|openai|anthropic|cerebras)\b/i.test(intention)) bindings.add('ai');
 
   return Array.from(bindings);
