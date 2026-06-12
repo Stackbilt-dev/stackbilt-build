@@ -4,7 +4,7 @@ import type { CLIOptions } from '../index.js';
 import { EXIT_CODE, CLIError } from '../index.js';
 import { getFlag } from '../flags.js';
 import type { BuildResult } from '../http-client.js';
-import { classify, buildScaffold } from '@stackbilt/scaffold-core';
+import { buildScaffold } from '@stackbilt/scaffold-core';
 
 export async function scaffoldCommand(options: CLIOptions, args: string[]): Promise<number> {
   const configPath = options.configPath || '.charter';
@@ -84,8 +84,7 @@ export async function scaffoldCommand(options: CLIOptions, args: string[]): Prom
     );
   }
 
-  const classifyResult = classify(intention);
-  const scaffoldOutput = buildScaffold(intention, classifyResult);
+  const scaffoldOutput = buildScaffold(intention);
 
   const outputDir = getFlag(args, '--output') ?? '.';
   const dryRun = args.includes('--dry-run');
@@ -99,8 +98,7 @@ export async function scaffoldCommand(options: CLIOptions, args: string[]): Prom
     console.log(JSON.stringify({
       outputDir,
       dryRun,
-      pattern: scaffoldOutput.pattern,
-      tier: scaffoldOutput.tier,
+      pattern: scaffoldOutput.classification.pattern,
       files: manifest,
     }, null, 2));
     if (!dryRun) {
@@ -111,7 +109,7 @@ export async function scaffoldCommand(options: CLIOptions, args: string[]): Prom
 
   console.log('');
   console.log(`  Local scaffold (inference-free · @stackbilt/scaffold-core)`);
-  console.log(`  Pattern: ${scaffoldOutput.pattern}  Tier: ${scaffoldOutput.tier}`);
+  console.log(`  Pattern: ${scaffoldOutput.classification.pattern}`);
   console.log(`  Output: ${path.resolve(outputDir)}`);
   console.log('');
 
@@ -133,13 +131,6 @@ export async function scaffoldCommand(options: CLIOptions, args: string[]): Prom
 
   console.log('');
   console.log(`  ${scaffoldOutput.files.length} files written.`);
-  if (scaffoldOutput.nextSteps.length > 0) {
-    console.log('');
-    console.log('  Next steps:');
-    for (const step of scaffoldOutput.nextSteps) {
-      console.log(`    ${step}`);
-    }
-  }
   return EXIT_CODE.SUCCESS;
 }
 
