@@ -7,6 +7,8 @@ import { resolveApiKey } from '../credentials.js';
 import { EngineClient, type BuildRequest, type ScaffoldResult } from '../http-client.js';
 import { buildScaffold } from '@stackbilt/scaffold-core';
 
+const PLATFORM_BASE_URL = process.env.STACKBILT_URL ?? 'https://stackbilder.com';
+
 // Write the unified cache contract so `stackbilt scaffold` can use it.
 // Shape: { intention, pattern, classification, governance, files?, createdAt }
 function writeCachedBuild(
@@ -28,6 +30,62 @@ function writeCachedBuild(
       createdAt: new Date().toISOString(),
     }, null, 2),
   );
+}
+
+// Adapt LocalScaffoldResult to the ScaffoldResult shape used by the rest of the command.
+function localScaffoldToResult(intention: string): ScaffoldResult {
+  const core = buildScaffold(intention);
+  const roleMap: Record<string, 'config' | 'scaffold' | 'governance' | 'test' | 'doc'> = {
+    entry: 'scaffold',
+    config: 'config',
+    test: 'test',
+    migration: 'scaffold',
+    contract: 'governance',
+    adf: 'governance',
+    readme: 'doc',
+  };
+  return {
+    files: core.files.map(f => ({
+      path: f.path,
+      content: f.content,
+      role: roleMap[f.role] ?? 'scaffold',
+    })),
+    fileSource: 'basic',
+    nextSteps: [
+      'npm install',
+      'npx wrangler dev',
+      `Pattern: ${core.classification.pattern} (confidence: ${Math.round(core.classification.confidence * 100)}%)`,
+    ],
+    seed: undefined,
+    facts: core.facts as unknown as Record<string, unknown>,
+  };
+}
+
+// POST the scaffold result to the platform /api/flows for platform record.
+async function persistToPlatform(
+  intention: string,
+  oracle: boolean,
+  apiKey: string,
+): Promise<{ id: string } | null> {
+  try {
+    const res = await fetch(`${PLATFORM_BASE_URL}/api/flows`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ intention, oracle }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`  [warn] Persist failed (${res.status}): ${text}`);
+      return null;
+    }
+    return res.json() as Promise<{ id: string }>;
+  } catch (err) {
+    console.error(`  [warn] Persist error: ${err}`);
+    return null;
+  }
 }
 
 const PHASE_LABELS = ['PRODUCT', 'UX', 'RISK', 'ARCHITECT', 'TDD', 'SPRINT'];
@@ -98,19 +156,27 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
 
   const resolvedOutput = outputDir ?? `./${slugify(description)}`;
   const dryRun = args.includes('--dry-run');
+  const useGateway = args.includes('--gateway');
+  const persist = args.includes('--persist');
+  const oracle = args.includes('--oracle');
 
   const resolved = resolveApiKey();
-  const baseUrl = urlOverride;
-  const client = new EngineClient({
-    baseUrl: baseUrl ?? resolved?.baseUrl,
-    apiKey: resolved?.apiKey ?? null,
-  });
 
-  const useGateway = !!resolved?.apiKey;
+  if (useGateway && !resolved?.apiKey) {
+    throw new CLIError('--gateway requires an API key. Run `stackbilt login --key sb_live_xxx` first.');
+  }
+
+  if (persist && !resolved?.apiKey) {
+    throw new CLIError('--persist requires an API key. Run `stackbilt login --key sb_live_xxx` first.');
+  }
 
   let scaffoldPromise: Promise<ScaffoldResult>;
 
   if (useGateway) {
+    const client = new EngineClient({
+      baseUrl: urlOverride ?? resolved?.baseUrl,
+      apiKey: resolved?.apiKey ?? null,
+    });
     scaffoldPromise = client.scaffold({
       description,
       project_type: args.includes('--cloudflare-only') ? 'worker' : undefined,
@@ -118,30 +184,22 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
       seed: seedStr ? parseInt(seedStr, 10) : undefined,
     });
   } else {
-    const request: BuildRequest = { description, constraints: {} };
-    if (args.includes('--cloudflare-only')) request.constraints!.cloudflareOnly = true;
-    if (fwOverride) request.constraints!.framework = fwOverride;
-    if (dbOverride) request.constraints!.database = dbOverride;
-    if (seedStr) request.seed = parseInt(seedStr, 10);
-
-    scaffoldPromise = client.build(request).then(r => {
-      return {
-        files: Object.entries(r.scaffold).map(([p, content]) => ({ path: p, content, role: 'scaffold' as const })),
-        fileSource: 'engine' as const,
-        nextSteps: ['npm install', 'npm run dev'],
-        seed: r.seed,
-        receipt: r.receipt,
-      };
-    });
+    // Default: fully offline, zero network
+    scaffoldPromise = Promise.resolve(localScaffoldToResult(description));
   }
 
   if (options.format === 'json') {
     const result = await scaffoldPromise;
-    console.log(JSON.stringify({ ...result, outputDir: resolvedOutput, dryRun }, null, 2));
+    const output: Record<string, unknown> = { ...result, outputDir: resolvedOutput, dryRun };
     if (!dryRun) {
       writeFiles(resolvedOutput, result.files);
       writeCachedBuild(description, result.files.map(({ path: p, content }) => ({ path: p, content })), options.configPath);
     }
+    if (persist && resolved?.apiKey) {
+      const persisted = await persistToPlatform(description, oracle, resolved.apiKey);
+      if (persisted) output.flowId = persisted.id;
+    }
+    console.log(JSON.stringify(output, null, 2));
     return EXIT_CODE.SUCCESS;
   }
 
@@ -149,7 +207,7 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
 
   console.log('');
   if (!useGateway) {
-    console.log('  \x1b[2m(tip: run `stackbilt login --key sb_live_xxx` for deployment-ready scaffolds)\x1b[0m');
+    console.log('  \x1b[2m(offline · @stackbilt/scaffold-core · zero network)\x1b[0m');
     console.log('');
   }
 
@@ -212,6 +270,15 @@ export async function runCommand(options: CLIOptions, args: string[]): Promise<n
       for (const step of result.nextSteps) {
         console.log(`    ${step}`);
       }
+    }
+  }
+
+  if (persist && resolved?.apiKey && !dryRun) {
+    const persisted = await persistToPlatform(description, oracle, resolved.apiKey);
+    if (persisted) {
+      console.log('');
+      console.log(`  → Persisted to platform · flow ID: ${persisted.id}`);
+      if (oracle) console.log('  → Oracle polish queued');
     }
   }
 

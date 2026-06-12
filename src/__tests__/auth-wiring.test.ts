@@ -123,29 +123,30 @@ describe('architect — governance-only (no network)', () => {
   });
 });
 
-describe('run — gateway vs engine routing', () => {
-  it('uses the gateway (scaffold) when the env var provides an API key', async () => {
+describe('run — offline-first with explicit --gateway opt-in', () => {
+  it('uses local buildScaffold() by default — no gateway call even with API key', async () => {
     mockedResolveApiKey.mockReturnValue({ apiKey: 'ea_env_gateway', source: 'env' });
 
     await runCommand(options, ['a description', '--dry-run']);
 
-    expect(hoisted.scaffoldFn).toHaveBeenCalledTimes(1);
+    // No EngineClient methods called — local path is zero-network
+    expect(hoisted.scaffoldFn).not.toHaveBeenCalled();
     expect(hoisted.buildFn).not.toHaveBeenCalled();
   });
 
-  it('falls back to engine /build when no API key is resolved', async () => {
+  it('uses local buildScaffold() with no API key — no credentials required', async () => {
     mockedResolveApiKey.mockReturnValue(null);
 
     await runCommand(options, ['a description', '--dry-run']);
 
-    expect(hoisted.buildFn).toHaveBeenCalledTimes(1);
     expect(hoisted.scaffoldFn).not.toHaveBeenCalled();
+    expect(hoisted.buildFn).not.toHaveBeenCalled();
   });
 
-  it('uses the gateway when login-stored credentials are resolved (parity with env path)', async () => {
+  it('uses the gateway scaffold when --gateway flag is passed with an API key', async () => {
     mockedResolveApiKey.mockReturnValue({ apiKey: 'sb_live_stored', source: 'credentials' });
 
-    await runCommand(options, ['a description', '--dry-run']);
+    await runCommand(options, ['a description', '--dry-run', '--gateway']);
 
     expect(hoisted.scaffoldFn).toHaveBeenCalledTimes(1);
     expect(hoisted.buildFn).not.toHaveBeenCalled();
